@@ -1,0 +1,139 @@
+"""Thin wrapper around the Google Gen AI SDK (`google-genai`).
+
+Both gemini_flash.py and gemini_pro.py call `generate_text()`. It retries
+temporary errors and, if a model is unavailable for your key (retired name,
+no access, quota), falls back to GEMINI_FALLBACK_MODEL.
+"""
+import logging
+import time
+
+from app import config
+
+logger = logging.getLogger("comiccraft.gemini")
+
+_client = None
+
+
+class GeminiError(RuntimeError):
+    """Raised when Gemini cannot produce a usable response."""
+
+
+def get_client():
+    """Create the Gemini client once and reuse it."""
+    global _client
+    if not config.GEMINI_API_KEY:
+        raise GeminiError(
+            "GEMINI_API_KEY is missing. Copy .env.example to .env, paste your key "
+            "from https://aistudio.google.com/apikey, then restart the server."
+        )
+    if _client is None:
+        from google import genai  # imported lazily so the app can start without a key
+
+        _client = genai.Client(api_key=config.GEMINI_API_KEY)
+    return _client
+
+
+def _call(model: str, prompt: str, json_mode: bool) -> str:
+    from google.genai import types
+
+    if json_mode:
+        cfg = types.GenerateContentConfig(response_mime_type="application/json")
+    else:
+        cfg = types.GenerateContentConfig()
+    response = get_client().models.generate_content(model=model, contents=prompt, config=cfg)
+    text = (response.text or "").strip()
+    if not text:
+        raise GeminiError(f"Model '{model}' returned an empty response (possibly blocked by safety filters).")
+    return text
+
+
+def _explain(exc: Exception, model: str) -> str:
+    message = str(exc)
+    lowered = message.lower()
+    code = getattr(exc, "code", None)
+    if "api key" in lowered or "api_key" in lowered:
+        return "Gemini rejected your API key. Check GEMINI_API_KEY in .env."
+    if code == 404 or "not found" in lowered:
+        return (f"Gemini model '{model}' was not found. Set GEMINI_FLASH_MODEL / GEMINI_PRO_MODEL "
+                "in .env to a model your key can use (run `python check_setup.py` to list them).")
+    if code == 429 or "quota" in lowered or "resource_exhausted" in lowered:
+        return "Gemini quota or rate limit reached. Wait a minute and try again, or pick another model in .env."
+    if code in (500, 503, 504) or "unavailable" in lowered or "high demand" in lowered:
+        return (f"Gemini model '{model}' is overloaded right now (Google-side, usually temporary). "
+                "Wait a minute and click Create again, or set a different model in .env.")
+    return f"Gemini request failed ({model}): {message}"
+
+
+def _discover_models(exclude: list[str]) -> list[str]:
+    """Ask Google which text models this key can use (Flash first, stable before preview)."""
+    try:
+        names = []
+        for m in get_client().models.list():
+            actions = getattr(m, "supported_actions", None) or []
+            name = (m.name or "").replace("models/", "")
+            if "generateContent" in actions and name.startswith("gemini") and "flash" in name:
+                if not any(bad in name for bad in ("image", "tts", "live", "audio", "embedding", "thinking")):
+                    names.append(name)
+    except Exception as exc:  # discovery is best-effort only
+        logger.warning("Could not list Gemini models: %s", exc)
+        return []
+    names = [n for n in names if n not in exclude]
+    names.sort(key=lambda n: ("preview" in n or "exp" in n, "lite" in n, n))
+    return names[:3]
+
+
+def _try_models(candidates: list[str], prompt: str, json_mode: bool, failures: list):
+    """Try each model in turn. Returns the reply text, or None if all failed."""
+    for name in candidates:
+        for attempt in range(1, config.GEMINI_RETRIES + 1):
+            try:
+                return _call(name, prompt, json_mode)
+            except GeminiError as exc:
+                if "API_KEY" in str(exc):   # no point retrying without a key
+                    raise
+                failures.append((name, exc))
+            except Exception as exc:  # SDK / network errors
+                failures.append((name, exc))
+                logger.warning("Gemini '%s' attempt %d failed: %s", name, attempt, exc)
+                if getattr(exc, "code", None) in (400, 401, 403, 404):
+                    break  # retrying the same model will not help
+            if attempt < config.GEMINI_RETRIES:
+                time.sleep(min(3 * 2 ** (attempt - 1), 20))   # 3s, 6s, 12s, 20s...
+        logger.warning("Gemini model '%s' failed, moving on", name)
+    return None
+
+
+def generate_text(model: str, prompt: str, json_mode: bool = False) -> str:
+    """Send `prompt` to `model` and return the text reply.
+
+    Temporary overload errors are retried with a growing wait. Then the models in
+    GEMINI_FALLBACK_MODELS are tried. If any of them is "not found", the models
+    your key can really use are looked up automatically.
+    """
+    candidates = [model]
+    for name in config.GEMINI_FALLBACK_MODELS:
+        if name and name not in candidates:
+            candidates.append(name)
+
+    failures: list = []
+    reply = _try_models(candidates, prompt, json_mode, failures)
+    if reply is not None:
+        return reply
+
+    if any(getattr(e, "code", None) == 404 for _, e in failures):
+        found = _discover_models(exclude=candidates)
+        if found:
+            logger.warning("Configured models not found; auto-trying: %s", ", ".join(found))
+            reply = _try_models(found, prompt, json_mode, failures)
+            if reply is not None:
+                logger.warning("Worked with '%s'. Set GEMINI_FLASH_MODEL=%s in .env to skip the search.", found[0], found[0])
+                return reply
+
+    # Build one message that lists every model that was tried.
+    seen = {}
+    for name, exc in failures:
+        seen[name] = exc
+    last_name, last_exc = list(seen.items())[-1] if seen else (model, None)
+    summary = "; ".join(f"{n}: {getattr(e, 'code', '') or 'error'}" for n, e in seen.items())
+    detail = _explain(last_exc, last_name) if last_exc else "No Gemini model could be reached."
+    raise GeminiError(f"{detail} (Models tried -> {summary})") from last_exc
