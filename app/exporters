@@ -1,0 +1,140 @@
+"""Step 5 - export the finished comic as a multi-page PDF (one panel per page) using FPDF2."""
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+
+from fpdf import FPDF
+from PIL import Image
+
+from app import config
+
+logger = logging.getLogger("comiccraft.pdf")
+
+# Common typographic characters that the built-in (latin-1) PDF font cannot draw.
+_ASCII_MAP = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+    "\u2013": "-", "\u2014": "-", "\u2026": "...", "\u2022": "*", "\u00a0": " ",
+})
+
+_FONT_SEARCH_DIRS = [
+    config.FONTS_DIR,
+    Path("/usr/share/fonts/truetype/dejavu"),
+    Path("C:/Windows/Fonts"),
+    Path("/Library/Fonts"),
+    Path("/System/Library/Fonts/Supplemental"),
+]
+
+
+def _find_font(filenames: list):
+    for folder in _FONT_SEARCH_DIRS:
+        for name in filenames:
+            candidate = folder / name
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+class _FontKit:
+    """Registers a Unicode TTF font when one is found, else falls back to built-in Helvetica."""
+
+    def __init__(self, pdf: FPDF):
+        self.family = "Helvetica"
+        self.unicode = False
+        self.styles = {"", "B", "I", "BI"}     # built-in font supports every style
+        regular = _find_font(["DejaVuSans.ttf", "arial.ttf", "Arial.ttf"])
+        if regular is None:
+            logger.warning("No Unicode font found; using Helvetica (special characters become '?').")
+            return
+        try:
+            pdf.add_font("ComicFont", "", str(regular))
+        except Exception as exc:  # corrupt / unsupported font file
+            logger.warning("Could not load font %s: %s", regular, exc)
+            return
+        self.family, self.unicode, self.styles = "ComicFont", True, {""}
+        for style, names in (("B", ["DejaVuSans-Bold.ttf"]), ("I", ["DejaVuSans-Oblique.ttf"])):
+            path = _find_font(names)
+            if path is not None:
+                try:
+                    pdf.add_font("ComicFont", style, str(path))
+                    self.styles.add(style)
+                except Exception as exc:
+                    logger.warning("Could not load font %s: %s", path, exc)
+
+    def apply(self, pdf: FPDF, style: str = "", size: int = 12):
+        pdf.set_font(self.family, style if style in self.styles else "", size)
+
+    def text(self, value) -> str:
+        value = str(value or "")
+        if self.unicode:
+            return value
+        return value.translate(_ASCII_MAP).encode("latin-1", "replace").decode("latin-1")
+
+
+def _place_image(pdf: FPDF, kit: _FontKit, image_path: str):
+    """Draw the panel image centred, keeping its aspect ratio, with a comic-style border."""
+    if not image_path or not os.path.exists(image_path):
+        kit.apply(pdf, "I", 11)
+        pdf.multi_cell(0, 7, kit.text(f"[Image missing: {image_path}]"), new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(3)
+        return
+    with Image.open(image_path) as img:
+        width_px, height_px = img.size
+    max_w, max_h = pdf.epw, 115.0
+    scale = min(max_w / width_px, max_h / height_px)
+    width, height = width_px * scale, height_px * scale
+    x = pdf.l_margin + (pdf.epw - width) / 2
+    y = pdf.get_y()
+    pdf.image(image_path, x=x, y=y, w=width, h=height)
+    pdf.set_draw_color(22, 24, 43)
+    pdf.set_line_width(0.8)
+    pdf.rect(x, y, width, height)
+    pdf.set_y(y + height + 6)
+
+
+def _block(pdf: FPDF, kit: _FontKit, label: str, body: str, style: str = "", size: int = 12):
+    if not body:
+        return
+    kit.apply(pdf, "B", 10)
+    pdf.set_text_color(110, 110, 120)
+    pdf.cell(0, 6, kit.text(label), new_x="LMARGIN", new_y="NEXT")
+    kit.apply(pdf, style, size)
+    pdf.set_text_color(25, 25, 35)
+    pdf.multi_cell(0, 6.5, kit.text(body), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+
+
+def save_pdf(layout: list, title: str = "My ComicCraft Comic") -> str:
+    """Compile the layout into a PDF in static/exports and return the file path."""
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_margins(15, 15, 15)
+    pdf.set_title(title)
+    pdf.set_creator("ComicCraft")
+    kit = _FontKit(pdf)
+
+    for panel in layout:
+        pdf.add_page()
+
+        kit.apply(pdf, "B", 17)
+        pdf.set_text_color(22, 24, 43)
+        pdf.multi_cell(0, 9, kit.text(f"Panel {panel['panel']}: {panel['title']}"),
+                       align="C", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(3)
+
+        _place_image(pdf, kit, panel.get("image_path", ""))
+
+        _block(pdf, kit, "Scene", panel.get("scene_description", ""), style="I", size=11)
+        _block(pdf, kit, "Caption", panel.get("caption", ""))
+        _block(pdf, kit, "Narration", panel.get("narration", ""))
+        dialogue = "\n".join(
+            f"{d['speaker']}: {d['line']}" if d.get("speaker") else d.get("line", "")
+            for d in panel.get("dialogue", [])
+        )
+        _block(pdf, kit, "Dialogue", dialogue)
+
+    config.EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    pdf_path = config.EXPORTS_DIR / f"comic_{timestamp}.pdf"
+    pdf.output(str(pdf_path))
+    return str(pdf_path)
