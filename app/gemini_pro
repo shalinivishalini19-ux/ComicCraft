@@ -1,0 +1,58 @@
+"""Step 2 - Gemini Pro expands the outline into narration and character dialogue."""
+import logging
+
+from app import config
+from app.gemini_client import generate_text
+
+logger = logging.getLogger("comiccraft.pro")
+
+
+def _describe(index: int, item) -> str:
+    """Turn one outline entry (dict or plain string) into a line of text."""
+    if isinstance(item, dict):
+        title = item.get("title", f"Panel {index}")
+        scene = item.get("scene_description", "")
+        return f"{index}. {title} - {scene}"
+    return f"{index}. {item}"
+
+
+def generate_story(outline: list, character_name: str = "", setting: str = "",
+                   tone: str = "", style: str = "") -> str:
+    """Write a comic-style story (narration + dialogue) from the panel outline.
+
+    Returns ONE text block. Every panel starts with a `[[PANEL n]]` marker so that
+    layout_builder.py can split it reliably.
+    """
+    formatted_outline = "\n".join(_describe(i, item) for i, item in enumerate(outline, start=1))
+    count = len(outline)
+
+    prompt = f"""
+You are a comic book writer.
+
+Write the script for a {count}-panel comic using the panel outline below.
+
+MAIN CHARACTER: {character_name or "the hero"}
+SETTING: {setting or "as described in the outline"}
+TONE: {tone or "engaging"}
+
+PANEL OUTLINE:
+{formatted_outline}
+
+Use EXACTLY this format for every panel, with no markdown, no bold, and no extra commentary:
+
+[[PANEL 1]]
+CAPTION: one short ambient caption (max 20 words)
+NARRATION: 2 to 3 sentences of narration
+DIALOGUE:
+Speaker name: "short line of dialogue"
+Speaker name: "short line of dialogue"
+
+Guidelines:
+- Write all {count} panels, numbered 1 to {count}.
+- Keep the tone {tone or "engaging"} and the writing fun, like a real comic book.
+- Give each panel 1 to 3 short dialogue lines (use sound effects like "Crack!" as a speaker named SFX if useful).
+- Keep each panel self-contained but part of one cohesive story.
+"""
+    story = generate_text(config.GEMINI_PRO_MODEL, prompt)
+    logger.info("Story generated (%d characters)", len(story))
+    return story
