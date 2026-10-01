@@ -1,0 +1,186 @@
+/* ComicCraft - printed-comic look: ink outlines, hard offset shadows, halftone dots. */
+:root {
+  --ink: #16182b;
+  --paper: #ffffff;
+  --pop: #ff3d71;
+  --sun: #ffd23f;
+  --teal: #2d6a7a;
+  --mint: #d9f1f4;
+  --danger-bg: #fff0f3;
+  --font-display: "Bangers", Impact, "Arial Black", sans-serif;
+  --font-body: "Nunito", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 1rem;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--mint);
+}
+
+/* Home + success pages: illustrated scenery. Preview page: halftone dots. */
+body.scenic {
+  background: #ffe3b8 url("/static/img/scene.svg") center bottom / cover no-repeat fixed;
+}
+body.dotted {
+  background-color: var(--mint);
+  background-image: radial-gradient(rgba(22, 24, 43, 0.14) 1.6px, transparent 1.8px);
+  background-size: 16px 16px;
+}
+
+.stage {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+
+.panel-card {
+  background: var(--paper);
+  border: 4px solid var(--ink);
+  box-shadow: 8px 8px 0 var(--ink);
+  padding: 28px;
+}
+.form-card { width: 100%; max-width: 580px; }
+.center-card { width: 100%; max-width: 520px; text-align: center; }
+
+.logo {
+  display: inline-block;
+  margin: 0 0 4px;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: clamp(2.6rem, 8vw, 3.8rem);
+  letter-spacing: 0.04em;
+  line-height: 1;
+  color: var(--pop);
+  text-shadow: -2px -2px 0 var(--ink), 2px -2px 0 var(--ink), -2px 2px 0 var(--ink),
+               2px 2px 0 var(--ink), 5px 5px 0 var(--sun);
+  transform: rotate(-2deg);
+}
+.lede { margin: 8px 0 8px; max-width: 46ch; }
+
+label { display: block; margin: 16px 0 6px; font-weight: 800; }
+
+input[type="text"], textarea, select {
+  width: 100%;
+  padding: 10px 12px;
+  font: inherit;
+  color: var(--ink);
+  background: #fff;
+  border: 3px solid var(--ink);
+  border-radius: 4px;
+}
+textarea { resize: vertical; min-height: 84px; }
+input:focus-visible, textarea:focus-visible, select:focus-visible,
+.btn:focus-visible, summary:focus-visible {
+  outline: 3px solid var(--pop);
+  outline-offset: 2px;
+}
+
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.grid-3 label { margin-top: 16px; }
+
+.btn {
+  display: inline-block;
+  padding: 12px 24px;
+  font-family: var(--font-display);
+  font-size: 1.45rem;
+  letter-spacing: 0.05em;
+  text-decoration: none;
+  color: #fff;
+  background: var(--pop);
+  border: 3px solid var(--ink);
+  box-shadow: 5px 5px 0 var(--ink);
+  cursor: pointer;
+  transition: transform 0.08s ease, box-shadow 0.08s ease;
+}
+.btn:hover { transform: translate(-1px, -1px); box-shadow: 6px 6px 0 var(--ink); }
+.btn:active { transform: translate(3px, 3px); box-shadow: 2px 2px 0 var(--ink); }
+.btn.secondary { color: var(--ink); background: var(--sun); }
+.btn.block { width: 100%; margin-top: 24px; }
+.btn:disabled { opacity: 0.6; cursor: wait; }
+
+.alert {
+  margin: 16px 0 0;
+  padding: 12px 14px;
+  background: var(--danger-bg);
+  border: 3px solid var(--ink);
+  border-left: 12px solid var(--pop);
+}
+
+/* ---------- loading overlay (shown while the AI works) ---------- */
+.busy {
+  position: fixed; inset: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: center; flex-direction: column;
+  gap: 14px; padding: 24px; text-align: center;
+  color: #fff; background: rgba(22, 24, 43, 0.9);
+}
+.busy h2 { margin: 0; font-family: var(--font-display); font-weight: 400; font-size: 2rem; letter-spacing: 0.04em; }
+.busy p { margin: 0; max-width: 40ch; }
+.spinner {
+  width: 60px; height: 60px;
+  border: 8px solid var(--sun); border-top-color: var(--pop); border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- comic preview ---------- */
+.wrap { max-width: 760px; margin: 0 auto; padding: 32px 16px 72px; }
+.page-title {
+  margin: 0 0 8px; text-align: center;
+  font-family: var(--font-display); font-weight: 400; font-size: clamp(2.2rem, 7vw, 3.2rem);
+  letter-spacing: 0.04em; color: var(--ink);
+}
+.page-sub { margin: 0 0 12px; text-align: center; }
+
+.comic-panel { position: relative; margin-top: 56px; }
+.panel-title {
+  display: inline-block; margin: -52px 0 16px -14px; padding: 4px 16px;
+  font-family: var(--font-display); font-weight: 400; font-size: 1.6rem; letter-spacing: 0.04em;
+  background: var(--sun); border: 3px solid var(--ink);
+}
+.comic-panel img { display: block; width: 100%; height: auto; border: 4px solid var(--ink); background: var(--mint); }
+.scene { margin: 14px 0 0; font-style: italic; color: #4a4e69; max-width: 68ch; }
+.caption-box {
+  display: inline-block; margin: 14px 0 0; padding: 8px 14px; font-weight: 800;
+  background: var(--sun); border: 3px solid var(--ink);
+}
+.narration { margin: 12px 0 0; line-height: 1.65; max-width: 68ch; }
+.dialogue { list-style: none; margin: 14px 0 0; padding: 0; }
+.bubble {
+  display: table; max-width: 90%; margin: 8px 0; padding: 8px 18px;
+  background: #fff; border: 3px solid var(--ink); border-radius: 24px;
+}
+.bubble:nth-child(even) { margin-left: auto; background: var(--mint); }
+.prompt-ref { margin-top: 14px; font-size: 0.9rem; color: #4a4e69; }
+.prompt-ref summary { cursor: pointer; font-weight: 800; }
+.prompt-ref p { margin: 6px 0 0; }
+
+.actions { display: flex; flex-wrap: wrap; gap: 16px; justify-content: center; margin-top: 48px; }
+
+/* ---------- export success ---------- */
+.check {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 84px; height: 84px; margin-bottom: 8px;
+  font-size: 3rem; font-weight: 800; color: #fff;
+  background: var(--teal); border: 4px solid var(--ink); border-radius: 50%;
+  box-shadow: 4px 4px 0 var(--ink);
+}
+.center-card h1 { margin: 8px 0; font-family: var(--font-display); font-weight: 400; font-size: 2.4rem; letter-spacing: 0.04em; }
+.center-card .actions { margin-top: 24px; }
+
+@media (max-width: 620px) {
+  .grid-3 { grid-template-columns: 1fr; gap: 0; }
+  .panel-card { padding: 20px; box-shadow: 6px 6px 0 var(--ink); }
+  .panel-title { margin-left: -8px; font-size: 1.3rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation: none; }
+  .btn { transition: none; }
+}
