@@ -1,0 +1,72 @@
+"""Central configuration: folder paths and environment variables.
+
+Everything user-tunable lives in the .env file (see .env.example).
+"""
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
+TEMPLATES_DIR = BASE_DIR / "templates"
+STATIC_DIR = BASE_DIR / "static"
+PANELS_DIR = STATIC_DIR / "panels"      # generated panel images
+EXPORTS_DIR = STATIC_DIR / "exports"    # exported comic PDFs
+FONTS_DIR = STATIC_DIR / "fonts"        # fonts used for PDF generation
+
+for _folder in (TEMPLATES_DIR, PANELS_DIR, EXPORTS_DIR, FONTS_DIR):
+    _folder.mkdir(parents=True, exist_ok=True)
+
+
+def _text(name: str, default: str = "") -> str:
+    """Read a string variable. Sample placeholders from .env.example count as 'not set'."""
+    value = os.getenv(name, default).strip()
+    if value.lower().startswith("your") or value.lower().endswith("_here"):
+        return ""
+    return value
+
+
+def _int(name: str, default: int, low: int, high: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(low, min(high, value))
+
+
+def _float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _bool(name: str, default: bool) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+# ---------------------------------------------------------------- Gemini (text)
+GEMINI_API_KEY = _text("GEMINI_API_KEY")
+GEMINI_FLASH_MODEL = _text("GEMINI_FLASH_MODEL", "gemini-3.8-flash")        # panel outline
+GEMINI_PRO_MODEL = _text("GEMINI_PRO_MODEL", "gemini-3.1-pro-preview")      # story + dialogue
+GEMINI_FALLBACK_MODEL = _text("GEMINI_FALLBACK_MODEL", "gemini-3.8-flash")  # used if a model fails
+GEMINI_RETRIES = _int("GEMINI_RETRIES", 4, 1, 8)
+# Comma-separated list tried in order when the main model keeps failing.
+GEMINI_FALLBACK_MODELS = [
+    m.strip() for m in (_text("GEMINI_FALLBACK_MODELS") or GEMINI_FALLBACK_MODEL).split(",") if m.strip()
+]
+
+# ---------------------------------------------------- Stable Diffusion (images)
+SD_MODEL_ID = _text("SD_MODEL_ID", "stable-diffusion-v1-5/stable-diffusion-v1-5")
+HF_TOKEN = _text("HF_API_KEY") or _text("HF_TOKEN")
+IMAGE_BACKEND = _text("IMAGE_BACKEND", "diffusers").lower()   # "diffusers" or "placeholder"
+IMAGE_FALLBACK = _bool("IMAGE_FALLBACK", True)                # placeholder image if SD fails
+SD_STEPS = _int("SD_STEPS", 25, 5, 100)
+SD_GUIDANCE = _float("SD_GUIDANCE", 7.5)
+SD_WIDTH = _int("SD_WIDTH", 512, 256, 1024)
+SD_HEIGHT = _int("SD_HEIGHT", 512, 256, 1024)
+
+# ---------------------------------------------------------------------- Comic
+PANEL_COUNT = _int("PANEL_COUNT", 5, 3, 8)
