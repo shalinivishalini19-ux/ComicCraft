@@ -1,0 +1,20 @@
+# Web app
+fastapi>=0.110
+uvicorn[standard]>=0.29
+jinja2>=3.1
+python-multipart>=0.0.9
+python-dotenv>=1.0
+
+# Gemini (text) - current Google Gen AI SDK
+google-genai>=1.0
+
+# Stable Diffusion (images)
+torch>=2.1
+diffusers>=0.30
+transformers>=4.40
+accelerate>=0.30
+safetensors>=0.4
+
+# Images + PDF
+Pillow>=10.0
+fpdf2>=2.7.9
