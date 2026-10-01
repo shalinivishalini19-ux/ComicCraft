@@ -1,0 +1,128 @@
+"""Automated tests. AI calls are mocked, so no API key, GPU or internet is needed.
+
+Run:  pytest -q
+"""
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from PIL import Image
+
+from app import config, image_generator, layout_builder, routes
+from app.main import app
+
+client = TestClient(app)
+
+OUTLINE = [
+    {"panel": i, "title": f"Title {i}", "scene_description": f"Scene {i}", "image_prompt": f"prompt {i}"}
+    for i in range(1, 4)
+]
+STORY = "\n\n".join(
+    f'[[PANEL {i}]]\nCAPTION: Caption {i}\nNARRATION: Narration {i}\nDIALOGUE:\nFree: "Hello {i}"'
+    for i in range(1, 4)
+)
+
+
+@pytest.fixture
+def fake_ai(monkeypatch, tmp_path):
+    """Replace Gemini + Stable Diffusion with instant fakes and write PDFs to a temp folder."""
+    def fake_image(prompt, filename=None, style=""):
+        path = tmp_path / f"{abs(hash(prompt))}.png"
+        Image.new("RGB", (64, 64), "orange").save(path)
+        return str(path)
+
+    monkeypatch.setattr(routes, "generate_outline", lambda *a, **k: OUTLINE)
+    monkeypatch.setattr(routes, "generate_story", lambda *a, **k: STORY)
+    monkeypatch.setattr(routes, "generate_image", fake_image)
+    monkeypatch.setattr(config, "EXPORTS_DIR", tmp_path)
+    return tmp_path
+
+
+def test_home_page_loads():
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "ComicCraft" in response.text
+    assert 'name="prompt"' in response.text
+
+
+def test_health():
+    assert client.get("/health").json()["status"] == "ok"
+
+
+def test_generate_form_returns_preview_and_pdf(fake_ai):
+    response = client.post("/generate", data={
+        "prompt": "A brave fox", "character_name": "Free",
+        "setting": "forest", "tone": "dramatic", "style": "anime",
+    })
+    assert response.status_code == 200
+    assert "Panel 1: Title 1" in response.text
+    assert "Hello 2" in response.text
+    assert "Download your comic as PDF" in response.text
+    pdfs = list(Path(fake_ai).glob("comic_*.pdf"))
+    assert len(pdfs) == 1 and pdfs[0].read_bytes().startswith(b"%PDF")
+
+
+def test_generate_json_api(fake_ai):
+    response = client.post("/generate-comic/json", json={"prompt": "A brave fox exploring a forest"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "success" and len(body["layout"]) == 3
+    assert body["pdf_path"].startswith("/static/exports/comic_")
+    assert "image_path" not in body["layout"][0]   # server paths are not leaked
+
+
+def test_generate_reports_ai_errors_on_the_form(monkeypatch):
+    def boom(*a, **k):
+        raise routes.GeminiError("Gemini quota or rate limit reached.")
+
+    monkeypatch.setattr(routes, "generate_outline", boom)
+    response = client.post("/generate", data={"prompt": "A brave fox", "character_name": "Free"})
+    assert response.status_code == 502
+    assert "quota" in response.text
+
+
+def test_validation_errors():
+    assert client.post("/generate", data={}).status_code == 422
+    assert client.post("/generate-comic/json", json={"prompt": "x"}).status_code == 422
+
+
+def test_export_success_page_only_accepts_export_paths():
+    good = client.get("/export-success", params={"pdf_path": "/static/exports/comic_1.pdf"})
+    assert "/static/exports/comic_1.pdf" in good.text
+    bad = client.get("/export-success", params={"pdf_path": "https://evil.example/x.pdf"})
+    assert "evil.example" not in bad.text
+
+
+def test_image_endpoint_with_placeholder_backend(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "IMAGE_BACKEND", "placeholder")
+    monkeypatch.setattr(config, "PANELS_DIR", tmp_path)
+    response = client.get("/test-image", params={"prompt": "a red fox"})
+    assert response.status_code == 200
+    assert Path(response.json()["path"]).is_file()
+
+
+def test_image_falls_back_to_placeholder_when_diffusion_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "IMAGE_BACKEND", "diffusers")
+    monkeypatch.setattr(config, "IMAGE_FALLBACK", True)
+    monkeypatch.setattr(config, "PANELS_DIR", tmp_path)
+
+    def broken(*a, **k):
+        raise RuntimeError("no GPU")
+
+    monkeypatch.setattr(image_generator, "_run_diffusion", broken)
+    assert Path(image_generator.generate_image("a red fox")).is_file()
+
+
+def test_layout_parser_handles_marker_format():
+    layout = layout_builder.build_comic_layout(["a.png", "b.png", "c.png"], STORY, OUTLINE)
+    assert [p["panel"] for p in layout] == [1, 2, 3]
+    assert layout[1]["caption"] == "Caption 2"
+    assert layout[1]["dialogue"] == [{"speaker": "Free", "line": "Hello 2"}]
+    assert layout[0]["image_url"] == "/static/panels/a.png"
+
+
+def test_layout_parser_handles_markdown_headings_and_missing_text():
+    story = "**Panel 1: Start**\n**CAPTION:** Dawn\n**NARRATION:** It begins.\n"
+    layout = layout_builder.build_comic_layout(["a.png", "b.png"], story, OUTLINE[:2])
+    assert layout[0]["caption"] == "Dawn" and layout[0]["narration"] == "It begins."
+    assert layout[1]["narration"] == "Scene 2"   # falls back to the scene description
