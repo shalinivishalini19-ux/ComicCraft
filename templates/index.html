@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ComicCraft - AI comic story creator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bangers&family=Nunito:wght@400;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="scenic">
+  <main class="stage">
+    <form id="comic-form" class="panel-card form-card" action="/generate" method="post">
+      <h1 class="logo">ComicCraft</h1>
+      <p class="lede">Describe a story and get a five-panel comic with pictures, narration and dialogue. Download it as a PDF.</p>
+
+      {% if error %}
+      <div class="alert" role="alert">
+        <strong>Your comic could not be created.</strong> {{ error }}
+      </div>
+      {% endif %}
+
+      <label for="prompt">Story prompt</label>
+      <textarea id="prompt" name="prompt" rows="3" minlength="3" maxlength="1000" required>{{ form.prompt }}</textarea>
+
+      <label for="character_name">Main character name</label>
+      <input id="character_name" name="character_name" type="text" maxlength="50" value="{{ form.character_name }}" required>
+
+      <div class="grid-3">
+        <div>
+          <label for="setting">Setting</label>
+          <select id="setting" name="setting">
+            {% for opt in options.setting %}
+            <option value="{{ opt }}" {% if form.setting == opt %}selected{% endif %}>{{ opt|title }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label for="tone">Story tone</label>
+          <select id="tone" name="tone">
+            {% for opt in options.tone %}
+            <option value="{{ opt }}" {% if form.tone == opt %}selected{% endif %}>{{ opt|title }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label for="style">Art style</label>
+          <select id="style" name="style">
+            {% for opt in options.style %}
+            <option value="{{ opt }}" {% if form.style == opt %}selected{% endif %}>{{ opt|title }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+
+      <button id="submit-btn" class="btn block" type="submit">Create my comic</button>
+    </form>
+  </main>
+
+  <div id="busy" class="busy" role="status" aria-live="polite" hidden>
+    <div class="spinner" aria-hidden="true"></div>
+    <h2 id="busy-title">Planning your panels</h2>
+    <p>Keep this tab open. Drawing the panels is the slow part: about a minute on a GPU, several minutes on a CPU.</p>
+    <p id="busy-clock">0:00</p>
+  </div>
+
+  <script>
+    (function () {
+      var form = document.getElementById("comic-form");
+      var button = document.getElementById("submit-btn");
+      var overlay = document.getElementById("busy");
+      var title = document.getElementById("busy-title");
+      var clock = document.getElementById("busy-clock");
+      var steps = ["Planning your panels", "Writing the script", "Drawing the panels", "Binding your PDF"];
+      var timer = null;
+
+      form.addEventListener("submit", function () {
+        var started = Date.now();
+        overlay.hidden = false;
+        button.disabled = true;
+        timer = setInterval(function () {
+          var seconds = Math.floor((Date.now() - started) / 1000);
+          clock.textContent = Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0");
+          title.textContent = steps[Math.min(Math.floor(seconds / 20), steps.length - 1)];
+        }, 1000);
+      });
+
+      // Coming back with the browser's Back button: reset the form state.
+      window.addEventListener("pageshow", function (event) {
+        if (event.persisted) {
+          clearInterval(timer);
+          overlay.hidden = true;
+          button.disabled = false;
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
