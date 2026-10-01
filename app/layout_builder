@@ -1,0 +1,98 @@
+"""Step 4 - bind each panel's image, title and story text into one layout list."""
+import re
+from pathlib import Path
+
+# Primary marker asked for in the Gemini Pro prompt: [[PANEL 3]]
+_PANEL_MARK = re.compile(r"\[\[\s*panel\s*(\d+)\s*\]\]", re.IGNORECASE)
+# Fallback for models that answer with headings such as "**Panel 3: Title**"
+_PANEL_HEADER = re.compile(r"^[#*\s_]*panel\s*(\d+)\b.*$", re.IGNORECASE | re.MULTILINE)
+_LABEL = re.compile(r"^[\s*_#>\-]*(caption|narration|dialogue|dialog)s?[\s*_]*:[\s*_]*(.*)$", re.IGNORECASE)
+_SPEAKER = re.compile(r"^[\s*_\-\u2022]*([^:\n]{1,40}?)[\s*_]*:[\s*_]*(.+)$")
+
+
+def _clean(text: str) -> str:
+    """Strip markdown bold/code markers the model may have added."""
+    return text.replace("**", "").replace("__", "").replace("`", "").strip()
+
+
+def _split_panels(story: str) -> dict:
+    """Split the full story into {panel_number: text}."""
+    for pattern in (_PANEL_MARK, _PANEL_HEADER):
+        matches = list(pattern.finditer(story))
+        if matches:
+            chunks = {}
+            for i, match in enumerate(matches):
+                end = matches[i + 1].start() if i + 1 < len(matches) else len(story)
+                chunks[int(match.group(1))] = story[match.end():end].strip()
+            return chunks
+    return {}
+
+
+def _parse_panel_text(body: str) -> dict:
+    """Extract caption, narration and dialogue lines from one panel's text."""
+    sections = {"caption": [], "narration": [], "dialogue": []}
+    current = "narration"  # unlabeled text is treated as narration
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        label = _LABEL.match(line)
+        if label:
+            key = label.group(1).lower()
+            current = "dialogue" if key.startswith("dialog") else key
+            rest = _clean(label.group(2))
+            if rest:
+                sections[current].append(rest)
+            continue
+        sections[current].append(_clean(line))
+
+    dialogue = []
+    for line in sections["dialogue"]:
+        speaker = _SPEAKER.match(line)
+        if speaker:
+            dialogue.append({"speaker": speaker.group(1).strip(),
+                             "line": speaker.group(2).strip().strip('"\u201c\u201d')})
+        else:
+            dialogue.append({"speaker": "", "line": line.strip('"\u201c\u201d')})
+
+    return {
+        "caption": " ".join(sections["caption"]).strip(),
+        "narration": " ".join(sections["narration"]).strip(),
+        "dialogue": dialogue,
+    }
+
+
+def build_comic_layout(image_paths: list, full_story: str, outline: list) -> list:
+    """Return one dict per panel, ready for the HTML preview and the PDF exporter.
+
+    Keys: panel, title, image_path (file on disk), image_url (web path), scene_description,
+    image_prompt, caption, narration, dialogue [{speaker, line}], text (combined plain text).
+    """
+    chunks = _split_panels(full_story or "")
+    layout = []
+    for idx, info in enumerate(outline, start=1):
+        image = image_paths[idx - 1] if idx - 1 < len(image_paths) else ""
+        parsed = _parse_panel_text(chunks.get(idx, ""))
+        scene = str(info.get("scene_description", "")).strip()
+        narration = parsed["narration"] or scene   # never leave a panel without text
+
+        text_lines = []
+        if parsed["caption"]:
+            text_lines.append(f"Caption: {parsed['caption']}")
+        text_lines.append(f"Narration: {narration}")
+        for d in parsed["dialogue"]:
+            text_lines.append(f"{d['speaker']}: {d['line']}" if d["speaker"] else d["line"])
+
+        layout.append({
+            "panel": idx,
+            "title": str(info.get("title") or f"Panel {idx}"),
+            "image_path": image,
+            "image_url": f"/static/panels/{Path(image).name}" if image else "",
+            "scene_description": scene,
+            "image_prompt": str(info.get("image_prompt", "")),
+            "caption": parsed["caption"],
+            "narration": narration,
+            "dialogue": parsed["dialogue"],
+            "text": "\n".join(text_lines),
+        })
+    return layout
