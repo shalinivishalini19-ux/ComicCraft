@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Comic exported - ComicCraft</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bangers&family=Nunito:wght@400;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="scenic">
+  <main class="stage">
+    <section class="panel-card center-card">
+      <div class="check" aria-hidden="true">&#10003;</div>
+      <h1>Comic exported</h1>
+      <p>Your comic is saved as a PDF. Print it, share it, or start a new story.</p>
+      <div class="actions">
+        {% if pdf_path %}
+        <a class="btn secondary" href="{{ pdf_path }}" download>Download again</a>
+        {% endif %}
+        <a class="btn" href="/">Create another comic</a>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
