@@ -1,0 +1,35 @@
+"""ComicCraft - AI comic story creator (FastAPI entry point).
+
+Run from the project root:   uvicorn app.main:app --reload
+"""
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+
+from app import config
+from app.routes import router
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("comiccraft")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if not config.GEMINI_API_KEY:
+        logger.warning("GEMINI_API_KEY is not set - add it to .env before generating comics.")
+    logger.info("Text models: outline=%s story=%s | images=%s (%s)",
+                config.GEMINI_FLASH_MODEL, config.GEMINI_PRO_MODEL, config.IMAGE_BACKEND, config.SD_MODEL_ID)
+    yield
+
+
+app = FastAPI(
+    title="ComicCraft",
+    description="Generate personalised comic stories and illustrations with Gemini and Stable Diffusion.",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")
+app.include_router(router)
