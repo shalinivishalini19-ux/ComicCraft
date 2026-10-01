@@ -1,0 +1,149 @@
+"""Step 3 - Stable Diffusion (Hugging Face Diffusers) paints each comic panel.
+
+* The model is loaded lazily on the first image (first run downloads ~4-5 GB).
+* Uses the GPU (CUDA / Apple MPS) when available, otherwise the CPU (slow but works).
+* If generation fails, or IMAGE_BACKEND=placeholder, a Pillow placeholder is drawn instead
+  so the rest of the app (layout, preview, PDF) can still be tested.
+"""
+import hashlib
+import logging
+import re
+import textwrap
+import threading
+import uuid
+
+from PIL import Image, ImageDraw, ImageFont
+
+from app import config
+
+logger = logging.getLogger("comiccraft.images")
+
+STYLE_PRESETS = {
+    "anime": "anime style illustration, vibrant colors, clean line art, cel shading, detailed background",
+    "pixel art": "pixel art, 16-bit retro game style, limited color palette, crisp pixels",
+    "comic book": "comic book illustration, bold clean ink outlines, flat vivid colors, dynamic composition",
+    "realistic": "realistic digital painting, cinematic lighting, highly detailed, sharp focus",
+}
+DEFAULT_STYLE = "comic book illustration, bold clean ink outlines, flat vivid colors"
+NEGATIVE_PROMPT = ("text, letters, words, watermark, signature, speech bubble, blurry, low quality, "
+                   "deformed, extra limbs, extra fingers, disfigured, cropped, abstract, noise, grainy, "
+                   "stripes, fingerprint pattern, texture only")
+
+_pipe = None
+_lock = threading.Lock()   # the pipeline is not thread-safe; generate one image at a time
+
+
+def sanitize_filename(prompt: str, extension: str = ".png") -> str:
+    """Turn a prompt into a safe, unique file name."""
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", prompt).strip("_").lower()[:40] or "panel"
+    return f"{slug}_{uuid.uuid4().hex[:8]}{extension}"
+
+
+def _load_pipeline():
+    """Load Stable Diffusion once and keep it in memory."""
+    global _pipe
+    if _pipe is not None:
+        return _pipe
+
+    import torch
+    from diffusers import StableDiffusionPipeline
+
+    if torch.cuda.is_available():
+        device, dtype = "cuda", torch.float16
+    elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        device, dtype = "mps", torch.float32
+    else:
+        device, dtype = "cpu", torch.float32
+
+    logger.info("Loading '%s' on %s (first run downloads the model)...", config.SD_MODEL_ID, device)
+    kwargs = {"torch_dtype": dtype}
+    if config.HF_TOKEN:
+        kwargs["token"] = config.HF_TOKEN
+    pipe = StableDiffusionPipeline.from_pretrained(config.SD_MODEL_ID, **kwargs)
+    try:  # DPM++ gives cleaner images than the default scheduler at 15-20 steps
+        from diffusers import DPMSolverMultistepScheduler
+        pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+    except Exception as exc:
+        logger.warning("Could not switch scheduler, using default: %s", exc)
+    pipe = pipe.to(device)
+    pipe.enable_attention_slicing()
+    _pipe = pipe
+    logger.info("Stable Diffusion ready.")
+    return _pipe
+
+
+def _run_diffusion(prompt: str, style: str) -> Image.Image:
+    preset = STYLE_PRESETS.get(style.strip().lower(), DEFAULT_STYLE)
+    # Style words go FIRST: Stable Diffusion only reads the first ~77 tokens.
+    full_prompt = f"{preset}, {prompt}"
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        with _lock:
+            pipe = _load_pipeline()
+            result = pipe(
+                prompt=full_prompt,
+                negative_prompt=NEGATIVE_PROMPT,
+                num_inference_steps=config.SD_STEPS,
+                guidance_scale=config.SD_GUIDANCE,
+                width=config.SD_WIDTH,
+                height=config.SD_HEIGHT,
+            )
+        flagged = getattr(result, "nsfw_content_detected", None)
+        if flagged and flagged[0]:
+            # The built-in checker often false-alarms on artwork and returns a black image.
+            # A new random attempt usually passes.
+            logger.warning("Safety checker flagged the image (attempt %d/%d), retrying...", attempt, attempts)
+            continue
+        return result.images[0]
+    raise RuntimeError("Stable Diffusion safety checker blocked every attempt for this panel.")
+
+
+def _font(size: int):
+    try:
+        return ImageFont.truetype(str(config.FONTS_DIR / "DejaVuSans-Bold.ttf"), size)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def _draw_placeholder(prompt: str, note: str) -> Image.Image:
+    """Comic-style placeholder panel (used when real generation is unavailable)."""
+    width, height = config.SD_WIDTH, config.SD_HEIGHT
+    digest = hashlib.md5(prompt.encode("utf-8")).digest()
+    base = (90 + digest[0] % 120, 90 + digest[1] % 120, 90 + digest[2] % 120)
+
+    image = Image.new("RGB", (width, height), base)
+    draw = ImageDraw.Draw(image)
+    for y in range(height):  # simple vertical gradient
+        shade = int(60 * y / height)
+        draw.line([(0, y), (width, y)], fill=(max(base[0] - shade, 0), max(base[1] - shade, 0), max(base[2] - shade, 0)))
+    for y in range(0, height, 16):  # halftone dots
+        for x in range((y // 16 % 2) * 8, width, 16):
+            draw.ellipse([x, y, x + 4, y + 4], fill=(255, 255, 255))
+    draw.rectangle([6, 6, width - 7, height - 7], outline=(20, 20, 35), width=6)
+
+    text = "\n".join(textwrap.wrap(prompt, width=34)[:8])
+    draw.rectangle([28, 40, width - 28, 60 + 22 * (text.count("\n") + 1) + 40], fill=(255, 226, 89), outline=(20, 20, 35), width=4)
+    draw.text((42, 52), note, font=_font(18), fill=(20, 20, 35))
+    draw.text((42, 88), text, font=_font(16), fill=(20, 20, 35), spacing=6)
+    return image
+
+
+def generate_image(prompt: str, filename: str | None = None, style: str = "") -> str:
+    """Create one comic-style image and return its file path (inside static/panels)."""
+    filename = filename or sanitize_filename(prompt)
+    path = config.PANELS_DIR / filename
+    config.PANELS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if config.IMAGE_BACKEND == "placeholder":
+        image = _draw_placeholder(prompt, "Placeholder image")
+    else:
+        try:
+            image = _run_diffusion(prompt, style)
+        except Exception as exc:
+            logger.exception("Image generation failed (%s): %s", type(exc).__name__, exc)
+            if not config.IMAGE_FALLBACK:
+                raise
+            image = _draw_placeholder(prompt, "AI image unavailable")
+
+    image.save(path)
+    return str(path)
