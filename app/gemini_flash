@@ -1,0 +1,95 @@
+"""Step 1 - Gemini Flash creates the structured panel-by-panel comic outline."""
+import json
+import logging
+import re
+
+from app import config
+from app.gemini_client import generate_text
+
+logger = logging.getLogger("comiccraft.flash")
+
+REQUIRED_KEYS = ("panel", "title", "scene_description", "image_prompt")
+
+
+def _strip_fences(text: str) -> str:
+    """Remove ```json ... ``` fences if the model added them."""
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+    return text.strip()
+
+
+def _parse_json_list(text: str) -> list:
+    text = _strip_fences(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("["), text.rfind("]")
+        if start == -1 or end <= start:
+            raise ValueError("Gemini did not return a JSON list of panels.")
+        data = json.loads(text[start:end + 1])
+
+    if isinstance(data, dict):  # e.g. {"panels": [...]}
+        data = next((v for v in data.values() if isinstance(v, list)), data)
+    if not isinstance(data, list):
+        raise ValueError("Gemini response is not a list.")
+    return data
+
+
+def _normalise(panels: list, expected: int) -> list:
+    clean = []
+    for number, panel in enumerate(panels, start=1):
+        if not isinstance(panel, dict) or not panel.get("image_prompt") or not panel.get("title"):
+            raise ValueError(f"Invalid panel format or missing keys: {panel}")
+        clean.append({
+            "panel": number,
+            "title": str(panel["title"]).strip(),
+            "scene_description": str(panel.get("scene_description") or panel["title"]).strip(),
+            "image_prompt": str(panel["image_prompt"]).strip(),
+        })
+    if len(clean) < expected:
+        raise ValueError(f"Gemini returned {len(clean)} panels but {expected} were requested.")
+    return clean[:expected]
+
+
+def generate_outline(user_prompt: str, character_name: str = "", setting: str = "",
+                     tone: str = "", style: str = "", panels: int | None = None) -> list:
+    """Generate a panel outline based on the user's story idea.
+
+    Returns a list of dicts: {"panel", "title", "scene_description", "image_prompt"}.
+    Raises GeminiError (API problems) or ValueError (unusable answer).
+    """
+    count = panels or config.PANEL_COUNT
+    prompt = f"""
+You are a professional AI comic planner.
+
+Plan a {count}-panel comic based on the story idea below.
+
+STORY IDEA: "{user_prompt}"
+MAIN CHARACTER: {character_name or "the hero"}
+SETTING: {setting or "any fitting setting"}
+TONE: {tone or "engaging"}
+ART STYLE: {style or "comic book"}
+
+Respond ONLY with a valid JSON array of exactly {count} objects - no explanations, no markdown.
+Each object must contain:
+- "panel" (integer, starting at 1)
+- "title" (string, 2 to 6 words)
+- "scene_description" (string, 1 to 2 sentences describing what happens)
+- "image_prompt" (string, under 35 words, a purely visual prompt for Stable Diffusion)
+
+Rules for every image_prompt:
+- Describe only what can be SEEN: subject, action, camera angle, lighting, background.
+- Invent ONE fixed look for the main character (species/age, colours, clothing) and repeat
+  that exact description in every image_prompt so the character looks the same in all panels.
+- Never ask for text, captions or speech bubbles inside the image.
+- Do not name the art style; it is added automatically.
+
+The panels must tell a story with a clear beginning, middle and end.
+"""
+    raw = generate_text(config.GEMINI_FLASH_MODEL, prompt, json_mode=True)
+    logger.info("Raw outline response: %s", raw[:500])
+    try:
+        return _normalise(_parse_json_list(raw), count)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"JSON parsing failed: {exc}") from exc
