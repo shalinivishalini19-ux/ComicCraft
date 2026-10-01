@@ -1,0 +1,2 @@
+# ComicCraft
+ComicCraft Ai Project 
