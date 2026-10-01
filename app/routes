@@ -1,0 +1,166 @@
+"""All FastAPI routes for ComicCraft."""
+import logging
+from pathlib import Path
+
+from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
+
+from app import config
+from app.exporters import save_pdf
+from app.gemini_client import GeminiError
+from app.gemini_flash import generate_outline
+from app.gemini_pro import generate_story
+from app.image_generator import generate_image
+from app.layout_builder import build_comic_layout
+
+logger = logging.getLogger("comiccraft.routes")
+
+router = APIRouter()
+templates = Jinja2Templates(directory=str(config.TEMPLATES_DIR))
+
+OPTIONS = {
+    "setting": ["forest", "school", "space", "city", "desert", "underwater"],
+    "tone": ["dramatic", "funny", "light-hearted", "poetic"],
+    "style": ["comic book", "anime", "pixel art", "realistic"],
+}
+DEFAULT_FORM = {
+    "prompt": "A brave fox exploring an enchanted forest.",
+    "character_name": "Free",
+    "setting": "forest",
+    "tone": "dramatic",
+    "style": "comic book",
+}
+
+
+class PromptRequest(BaseModel):
+    """JSON body for POST /generate-comic/json."""
+    prompt: str = Field(..., min_length=3, max_length=1000, examples=["A brave fox exploring an enchanted forest."])
+    character_name: str = Field("Hero", max_length=50, examples=["Free"])
+    setting: str = Field("forest", max_length=50)
+    tone: str = Field("dramatic", max_length=50)
+    style: str = Field("comic book", max_length=50)
+
+
+# ------------------------------------------------------------------ helpers
+def run_pipeline(prompt: str, character_name: str, setting: str, tone: str, style: str):
+    """outline -> story -> images -> layout -> PDF. Returns (layout, web path of the PDF)."""
+    prompt, character_name = prompt.strip(), character_name.strip() or "Hero"
+    setting, tone, style = setting.strip(), tone.strip(), style.strip()
+
+    # Step 1: Gemini Flash - panel outline
+    outline = generate_outline(prompt, character_name=character_name, setting=setting, tone=tone, style=style)
+    if not isinstance(outline, list) or not all("image_prompt" in panel for panel in outline):
+        raise ValueError("Invalid outline structure from Gemini response.")
+
+    # Step 2: Gemini Pro - narration and dialogue
+    full_story = generate_story(outline, character_name=character_name, setting=setting, tone=tone, style=style)
+
+    # Step 3: Stable Diffusion - one image per panel
+    images = [generate_image(panel["image_prompt"], style=style) for panel in outline]
+
+    # Step 4: layout binding
+    layout = build_comic_layout(images, full_story, outline)
+
+    # Step 5: PDF export
+    pdf_path = save_pdf(layout, title=f"{character_name}: {prompt[:60]}")
+    return layout, f"/static/exports/{Path(pdf_path).name}"
+
+
+def public_layout(layout: list) -> list:
+    """Layout without server file-system paths (used for JSON responses)."""
+    return [{k: v for k, v in panel.items() if k != "image_path"} for panel in layout]
+
+
+def friendly_error(exc: Exception) -> str:
+    if isinstance(exc, GeminiError):
+        return str(exc)
+    if isinstance(exc, ValueError):
+        return f"The AI returned something unexpected ({exc}). Please try again."
+    return f"Unexpected error: {exc}"
+
+
+def index_context(form: dict | None = None, error: str | None = None) -> dict:
+    return {"form": form or DEFAULT_FORM, "options": OPTIONS, "error": error}
+
+
+# ------------------------------------------------------------------- routes
+@router.get("/", response_class=HTMLResponse)
+def home(request: Request):
+    """Homepage with the story form."""
+    return templates.TemplateResponse(request, "index.html", index_context())
+
+
+@router.post("/generate", response_class=HTMLResponse)
+def generate_comic(
+    request: Request,
+    prompt: str = Form(..., min_length=3, max_length=1000),
+    character_name: str = Form("Hero", max_length=50),
+    setting: str = Form("forest", max_length=50),
+    tone: str = Form("dramatic", max_length=50),
+    style: str = Form("comic book", max_length=50),
+):
+    """Form submission: run the whole AI pipeline and show the comic preview."""
+    form = {"prompt": prompt, "character_name": character_name, "setting": setting, "tone": tone, "style": style}
+    try:
+        layout, web_pdf_path = run_pipeline(prompt, character_name, setting, tone, style)
+    except Exception as exc:  # show the problem on the form instead of a bare JSON error
+        logger.exception("Comic generation failed")
+        status = 502 if isinstance(exc, (GeminiError, ValueError)) else 500
+        return templates.TemplateResponse(
+            request, "index.html", index_context(form, friendly_error(exc)), status_code=status
+        )
+    return templates.TemplateResponse(
+        request, "comic_preview.html", {"layout": layout, "pdf_path": web_pdf_path}
+    )
+
+
+@router.post("/generate-comic/json")
+def generate_comic_json(payload: PromptRequest):
+    """API endpoint: same pipeline, JSON in / JSON out."""
+    try:
+        layout, web_pdf_path = run_pipeline(
+            payload.prompt, payload.character_name, payload.setting, payload.tone, payload.style
+        )
+    except (GeminiError, ValueError) as exc:
+        logger.exception("Comic generation failed")
+        raise HTTPException(status_code=502, detail=friendly_error(exc))
+    except Exception as exc:
+        logger.exception("Comic generation failed")
+        raise HTTPException(status_code=500, detail=friendly_error(exc))
+    return {"status": "success", "layout": public_layout(layout), "pdf_path": web_pdf_path}
+
+
+@router.get("/export-success", response_class=HTMLResponse)
+def export_success(request: Request, pdf_path: str = ""):
+    """Confirmation page shown after the PDF download starts."""
+    safe = ""
+    if pdf_path.startswith("/static/exports/") and pdf_path.lower().endswith(".pdf") and ".." not in pdf_path:
+        safe = pdf_path
+    return templates.TemplateResponse(request, "export_success.html", {"pdf_path": safe})
+
+
+@router.get("/test-image")
+def test_image(prompt: str = "A futuristic city at sunset, sci-fi, cinematic, artstation", style: str = "comic book"):
+    """Developer utility: generate a single image without running the whole pipeline."""
+    try:
+        image_path = generate_image(prompt, style=style)
+    except Exception as exc:
+        logger.exception("Image test failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"message": "Image generated successfully", "path": image_path,
+            "url": f"/static/panels/{Path(image_path).name}"}
+
+
+@router.get("/health")
+def health():
+    """Quick configuration check (never exposes the keys themselves)."""
+    return {
+        "status": "ok",
+        "gemini_key_configured": bool(config.GEMINI_API_KEY),
+        "flash_model": config.GEMINI_FLASH_MODEL,
+        "pro_model": config.GEMINI_PRO_MODEL,
+        "image_backend": config.IMAGE_BACKEND,
+        "sd_model": config.SD_MODEL_ID,
+    }
